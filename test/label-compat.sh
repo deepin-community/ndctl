@@ -10,13 +10,14 @@ BASE=$(dirname $0)
 . $BASE/common
 
 check_min_kver "4.11" || do_skip "may not provide reliable isetcookie values"
+check_prereq "jq"
 
 trap 'err $LINENO' ERR
 
 # setup (reset nfit_test dimms)
 modprobe nfit_test
 $NDCTL disable-region -b $NFIT_TEST_BUS0 all
-$NDCTL zero-labels -b $NFIT_TEST_BUS0 all
+$NDCTL init-labels -f -b $NFIT_TEST_BUS0 all
 
 # grab the largest pmem region on -b $NFIT_TEST_BUS0
 query=". | sort_by(.available_size) | reverse | .[0].dev"

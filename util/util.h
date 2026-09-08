@@ -63,6 +63,12 @@
 #define BUILD_BUG_ON_ZERO(e) (sizeof(struct { int:-!!(e); }))
 #define BUILD_BUG_ON(condition) ((void)sizeof(char[1 - 2*!!(condition)]))
 
+/* Are two types/vars the same type (ignoring qualifiers)? */
+#define __same_type(a, b) __builtin_types_compatible_p(typeof(a), typeof(b))
+
+/* &a[0] degrades to a pointer: a different type from an array */
+#define __must_be_array(a)	BUILD_BUG_ON_ZERO(__same_type((a), &(a)[0]))
+
 enum {
 	READ, WRITE,
 };
@@ -71,6 +77,15 @@ static inline const char *skip_prefix(const char *str, const char *prefix)
 {
         size_t len = strlen(prefix);
         return strncmp(str, prefix, len) ? NULL : str + len;
+}
+
+static inline const char *which_sep(const char *filter)
+{
+	if (strchr(filter, ' '))
+		return " ";
+	if (strchr(filter, ','))
+		return ",";
+	return " ";
 }
 
 static inline int is_absolute_path(const char *path)

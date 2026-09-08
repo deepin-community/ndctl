@@ -256,6 +256,11 @@ static int __label_validate(struct nvdimm_data *ndd)
 	return -EINVAL;
 }
 
+NDCTL_EXPORT unsigned int ndctl_dimm_sizeof_namespace_index(struct ndctl_dimm *dimm)
+{
+	return sizeof_namespace_index(&dimm->ndd);
+}
+
 /*
  * If the dimm labels have not been previously validated this routine
  * will make up a default size. Otherwise, it will pick the size based
@@ -752,6 +757,15 @@ NDCTL_EXPORT int ndctl_dimm_disable_passphrase(struct ndctl_dimm *dimm,
 	return write_security(dimm, buf);
 }
 
+NDCTL_EXPORT int ndctl_dimm_disable_master_passphrase(struct ndctl_dimm *dimm,
+						      long key)
+{
+	char buf[SYSFS_ATTR_SIZE];
+
+	sprintf(buf, "disable_master %ld\n", key);
+	return write_security(dimm, buf);
+}
+
 NDCTL_EXPORT int ndctl_dimm_freeze_security(struct ndctl_dimm *dimm)
 {
 	return write_security(dimm, "freeze");
@@ -839,7 +853,7 @@ NDCTL_EXPORT int ndctl_dimm_wait_overwrite(struct ndctl_dimm *dimm)
 		dbg(ctx, "%s: overwrite complete\n",
 				ndctl_dimm_get_devname(dimm));
 	else if (rc == 0)
-		dbg(ctx, "%s: ovewrite skipped\n",
+		dbg(ctx, "%s: overwrite skipped\n",
 				ndctl_dimm_get_devname(dimm));
 	else
 		dbg(ctx, "%s: overwrite error waiting for complete\n",

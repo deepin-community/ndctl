@@ -11,6 +11,7 @@
 #include <util/log.h>
 #include <util/sysfs.h>
 #include <ndctl/libndctl.h>
+#include <ndctl/ndctl.h>
 #include <ccan/array_size/array_size.h>
 
 #define KVER_STRLEN 20
@@ -106,11 +107,11 @@ int ndctl_test_get_skipped(struct ndctl_test *test)
 	return test->skip;
 }
 
-int nfit_test_init(struct kmod_ctx **ctx, struct kmod_module **mod,
+int ndctl_test_init(struct kmod_ctx **ctx, struct kmod_module **mod,
 		struct ndctl_ctx *nd_ctx, int log_level,
 		struct ndctl_test *test)
 {
-	int rc;
+	int rc, family = -1;
 	unsigned int i;
 	const char *name;
 	struct ndctl_bus *bus;
@@ -119,17 +120,33 @@ int nfit_test_init(struct kmod_ctx **ctx, struct kmod_module **mod,
 		"nfit",
 		"device_dax",
 		"dax_pmem",
-		"dax_pmem_core",
 		"dax_pmem_compat",
 		"libnvdimm",
-		"nd_blk",
 		"nd_btt",
 		"nd_e820",
 		"nd_pmem",
 	};
+	char *test_env;
 
 	log_init(&log_ctx, "test/init", "NDCTL_TEST");
 	log_ctx.log_priority = log_level;
+
+	/*
+	 * The following two checks determine the platform family. For
+	 * Intel/platforms which support ACPI, check sysfs; for other platforms
+	 * determine from the environment variable NVDIMM_TEST_FAMILY
+	 */
+	if (access("/sys/bus/acpi", F_OK) == 0)
+		family = NVDIMM_FAMILY_INTEL;
+
+	test_env = getenv("NDCTL_TEST_FAMILY");
+	if (test_env && strcmp(test_env, "PAPR") == 0)
+		family = NVDIMM_FAMILY_PAPR;
+
+	if (family == -1) {
+		log_err(&log_ctx, "Cannot determine NVDIMM family\n");
+		return -ENOTSUP;
+	}
 
 	*ctx = kmod_new(NULL, NULL);
 	if (!*ctx)
@@ -162,34 +179,37 @@ int nfit_test_init(struct kmod_ctx **ctx, struct kmod_module **mod,
 		/*
 		 * Skip device-dax bus-model modules on pre-v5.1
 		 */
-		if ((strcmp(name, "dax_pmem_core") == 0
-				|| strcmp(name, "dax_pmem_compat") == 0)
-				&& !ndctl_test_attempt(test,
-					KERNEL_VERSION(5, 1, 0)))
+		if ((strcmp(name, "dax_pmem_compat") == 0) &&
+		    !ndctl_test_attempt(test, KERNEL_VERSION(5, 1, 0)))
 			continue;
 
 retry:
 		rc = kmod_module_new_from_name(*ctx, name, mod);
-
-		/*
-		 * dax_pmem_compat is not required, missing is ok,
-		 * present-but-production is not ok.
-		 */
-		if (rc && strcmp(name, "dax_pmem_compat") == 0)
-			continue;
-
 		if (rc) {
-			log_err(&log_ctx, "%s.ko: missing\n", name);
+			log_err(&log_ctx, "failed to interrogate %s.ko\n",
+				name);
 			break;
 		}
 
 		path = kmod_module_get_path(*mod);
 		if (!path) {
+			/*
+			 * dax_pmem_compat is not required, missing is
+			 * ok, present-but-production is not ok.
+			 */
+			if (strcmp(name, "dax_pmem_compat") == 0)
+				continue;
+
+			if (family != NVDIMM_FAMILY_INTEL &&
+			    (strcmp(name, "nfit") == 0 ||
+			     strcmp(name, "nd_e820") == 0))
+				continue;
+
 			log_err(&log_ctx, "%s.ko: failed to get path\n", name);
 			break;
 		}
 
-		if (!strstr(path, "/extra/")) {
+		if (!strstr(path, "/extra/") && !strstr(path, "/updates/")) {
 			log_err(&log_ctx, "%s.ko: appears to be production version: %s\n",
 					name, path);
 			break;
@@ -237,8 +257,8 @@ retry:
 		ndctl_bus_foreach(nd_ctx, bus) {
 			struct ndctl_region *region;
 
-			if (strncmp(ndctl_bus_get_provider(bus),
-						"nfit_test", 9) != 0)
+			if (strcmp(ndctl_bus_get_provider(bus),
+				   "nfit_test.0") != 0)
 				continue;
 			ndctl_region_foreach(bus, region)
 				ndctl_region_disable_invalidate(region);
@@ -256,5 +276,30 @@ retry:
 			NULL, NULL, NULL, NULL);
 	if (rc)
 		kmod_unref(*ctx);
-	return rc;
+
+	if (!nd_ctx)
+		return rc;
+
+	ndctl_bus_foreach (nd_ctx, bus) {
+		struct ndctl_region *region;
+		struct ndctl_dimm *dimm;
+
+		if (strcmp(ndctl_bus_get_provider(bus), "nfit_test.0") != 0)
+			continue;
+
+		ndctl_region_foreach (bus, region)
+			ndctl_region_disable_invalidate(region);
+
+		ndctl_dimm_foreach (bus, dimm) {
+			ndctl_dimm_read_label_index(dimm);
+			ndctl_dimm_init_labels(dimm, NDCTL_NS_VERSION_1_2);
+			ndctl_dimm_disable(dimm);
+			ndctl_dimm_enable(dimm);
+		}
+
+		ndctl_region_foreach (bus, region)
+			ndctl_region_enable(region);
+	}
+
+	return 0;
 }

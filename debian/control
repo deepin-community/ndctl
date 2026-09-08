@@ -2,16 +2,22 @@ Source: ndctl
 Maintainer: Adam Borowski <kilobyte@angband.pl>
 Section: libs
 Priority: optional
-Standards-Version: 4.5.0
-Build-Depends: debhelper-compat (= 12),
-               pkg-config,
+Standards-Version: 4.7.2
+Build-Depends: debhelper-compat (= 13),
+               pkgconf,
                libkmod-dev,
                libudev-dev,
                uuid-dev,
                libjson-c-dev,
                bash-completion,
                libkeyutils-dev,
-               asciidoctor
+               asciidoctor,
+               libiniparser-dev,
+               libtraceevent-dev,
+               libtracefs-dev,
+               meson,
+               cmake,
+               systemd-dev,
 Rules-Requires-Root: no
 Homepage: https://github.com/pmem/ndctl
 Vcs-Git: https://github.com/kilobyte/ndctl -b debian
@@ -21,7 +27,7 @@ Package: ndctl
 Section: misc
 Architecture: linux-any
 Multi-Arch: foreign
-Depends: ${shlibs:Depends}, ${misc:Depends}
+Depends: ${shlibs:Depends}, ${misc:Depends}, cxl
 Pre-Depends: ${misc:Pre-Depends}
 Description: Utility for managing the nvdimm subsystem
  The nvdimm subsystem defines a kernel device model and control message
@@ -58,8 +64,6 @@ Section: misc
 Architecture: linux-any
 Multi-Arch: foreign
 Depends: ${shlibs:Depends}, ${misc:Depends}
-Breaks: ndctl (<< 63-1.3~)
-Replaces: ndctl (<< 63-1.3~)
 Description: Utility for managing the device DAX subsystem
  "DAX" are file system extensions to bypass the page cache and block layer to
  mmap persistent memory, from a PMEM block device, directly into a process
@@ -85,9 +89,46 @@ Section: libdevel
 Architecture: linux-any
 Multi-Arch: same
 Depends: libdaxctl1 (= ${binary:Version}), ${misc:Depends}
-Breaks: libndctl-dev (<< 63-1.3~)
-Replaces: libndctl-dev (<< 63-1.3~)
 Description: Development files for libdaxctl
  Header files and development library for compiling C programs to link
  with the libdaxctl library and manage the device DAX subsystem in the
  Linux kernel.
+
+Package: libcxl1
+Architecture: linux-any
+Multi-Arch: same
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: utility library for managing Compute Express Link devices
+ CXL (Compute Express Link) is a family of PCIe-based protocols that can be
+ used to connect high-speed I/O and memory devices.  This library includes
+ code to enumerate/query/configure such devices.
+
+Package: libcxl-dev
+Section: libdevel
+Architecture: linux-any
+Multi-Arch: same
+Depends: libcxl1 (= ${binary:Version}), ${misc:Depends}
+Description: Development files for libcxl
+ Header files and development library for compiling C programs to link
+ with the libcxl library and manage the Compute Express Link subsystem in
+ the Linux kernel.
+
+Package: cxl
+Section: misc
+Architecture: linux-any
+Multi-Arch: foreign
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Pre-Depends: ${misc:Pre-Depends}
+Replaces: ndctl (<< 77~)
+Breaks: ndctl (<< 77~)
+Description: provisioning for CXL device memory
+ This utility provides commands for enumerating and provisioning CXL devices.
+ CXL is a protocol that allows accessing memory over the PCI bus (PCIe ≥ 5)
+ with full cache coherency.  The access can be in either direction, with
+ latencies closer to that of DDR (usually less than twice as bad) rather than
+ those usually associated with PCI attached storage.
+ .
+ This can be used eg. for installing many terabytes of memory into one
+ machine, dynamically sharing a pool of memory between machines in a rack,
+ letting a smart NIC use the host's memory on its own, letting a GPU access
+ both the host's memory and its own concurrently with the host, etc.

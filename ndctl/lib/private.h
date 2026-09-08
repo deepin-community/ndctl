@@ -14,8 +14,9 @@
 #include <ccan/list/list.h>
 #include <ccan/array_size/array_size.h>
 
-#include <ndctl.h>
+#include <ndctl/ndctl.h>
 #include <ndctl/libndctl.h>
+#include <ndctl/libndctl-nfit.h>
 #include <ccan/endian/endian.h>
 #include <ccan/short_types/short_types.h>
 #include "intel.h"
@@ -23,7 +24,6 @@
 #include "msft.h"
 #include "hyperv.h"
 #include "papr.h"
-#include "libndctl-nfit.h"
 
 struct nvdimm_data {
 	struct ndctl_cmd *cmd_read;
@@ -75,6 +75,7 @@ struct ndctl_dimm {
 	char *unique_id;
 	char *dimm_path;
 	char *dimm_buf;
+	char *bus_prefix;
 	int health_eventfd;
 	int buf_len;
 	int id;
@@ -129,6 +130,7 @@ struct ndctl_ctx {
 	int regions_init;
 	void *userdata;
 	struct list_head busses;
+	const char *config_path;
 	int busses_init;
 	struct udev *udev;
 	struct udev_queue *udev_queue;
@@ -161,6 +163,7 @@ struct ndctl_bus {
 	int regions_init;
 	int has_nfit;
 	int has_of_node;
+	int has_cxl;
 	char *bus_path;
 	char *bus_buf;
 	size_t buf_len;
@@ -370,8 +373,6 @@ static inline int check_kmod(struct kmod_ctx *kmod_ctx)
 	return kmod_ctx ? 0 : -ENXIO;
 }
 
-int ndctl_bus_nfit_translate_spa(struct ndctl_bus *bus, unsigned long long addr,
-		unsigned int *handle, unsigned long long *dpa);
 struct ndctl_cmd *ndctl_bus_cmd_new_err_inj(struct ndctl_bus *bus);
 struct ndctl_cmd *ndctl_bus_cmd_new_err_inj_clr(struct ndctl_bus *bus);
 struct ndctl_cmd *ndctl_bus_cmd_new_err_inj_stat(struct ndctl_bus *bus,

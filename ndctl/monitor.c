@@ -7,14 +7,14 @@
 #include <time.h>
 #include <dirent.h>
 #include <util/json.h>
-#include <util/filter.h>
 #include <util/util.h>
 #include <util/parse-options.h>
+#include <util/parse-configs.h>
 #include <util/strbuf.h>
-#include <ndctl/config.h>
 #include <ndctl/ndctl.h>
 #include <ndctl/libndctl.h>
 #include <sys/epoll.h>
+#include <sys/stat.h>
 #define BUF_SIZE 2048
 
 /* reuse the core log helpers for the monitor logger */
@@ -26,11 +26,13 @@
 #endif
 #include <util/log.h>
 
+#include "filter.h"
+#include "json.h"
+
 static struct monitor {
 	const char *log;
-	const char *config_file;
+	const char *configs;
 	const char *dimm_event;
-	FILE *log_file;
 	bool daemon;
 	bool human;
 	bool verbose;
@@ -47,7 +49,7 @@ struct monitor_dimm {
 	struct list_node list;
 };
 
-static struct util_filter_params param;
+static struct ndctl_filter_params param;
 
 static int did_fail;
 
@@ -57,38 +59,6 @@ do { \
 	dbg(&monitor, "ndctl-%s:%s:%d: " fmt, \
 			VERSION, __func__, __LINE__, ##__VA_ARGS__); \
 } while (0)
-
-static void log_syslog(struct log_ctx *ctx, int priority, const char *file,
-		int line, const char *fn, const char *format, va_list args)
-{
-	vsyslog(priority, format, args);
-}
-
-static void log_standard(struct log_ctx *ctx, int priority, const char *file,
-		int line, const char *fn, const char *format, va_list args)
-{
-	if (priority == 6)
-		vfprintf(stdout, format, args);
-	else
-		vfprintf(stderr, format, args);
-}
-
-static void log_file(struct log_ctx *ctx, int priority, const char *file,
-		int line, const char *fn, const char *format, va_list args)
-{
-	FILE *f = monitor.log_file;
-
-	if (priority != LOG_NOTICE) {
-		struct timespec ts;
-
-		clock_gettime(CLOCK_REALTIME, &ts);
-		fprintf(f, "[%10ld.%09ld] [%d] ", ts.tv_sec, ts.tv_nsec, getpid());
-		vfprintf(f, format, args);
-	} else
-		vfprintf(f, format, args);
-
-	fflush(f);
-}
 
 static struct json_object *dimm_event_to_json(struct monitor_dimm *mdimm)
 {
@@ -262,12 +232,12 @@ out:
 }
 
 static bool filter_region(struct ndctl_region *region,
-		struct util_filter_ctx *fctx)
+			  struct ndctl_filter_ctx *fctx)
 {
 	return true;
 }
 
-static void filter_dimm(struct ndctl_dimm *dimm, struct util_filter_ctx *fctx)
+static void filter_dimm(struct ndctl_dimm *dimm, struct ndctl_filter_ctx *fctx)
 {
 	struct monitor_dimm *mdimm;
 	struct monitor_filter_arg *mfa = fctx->monitor;
@@ -315,7 +285,7 @@ static void filter_dimm(struct ndctl_dimm *dimm, struct util_filter_ctx *fctx)
 	return;
 }
 
-static bool filter_bus(struct ndctl_bus *bus, struct util_filter_ctx *fctx)
+static bool filter_bus(struct ndctl_bus *bus, struct ndctl_filter_ctx *fctx)
 {
 	return true;
 }
@@ -463,7 +433,7 @@ out:
 	return rc;
 }
 
-static void parse_config(const char **arg, char *key, char *val, char *ident)
+static void set_monitor_conf(const char **arg, char *key, char *val, char *ident)
 {
 	struct strbuf value = STRBUF_INIT;
 	size_t arg_len = *arg ? strlen(*arg) : 0;
@@ -479,39 +449,25 @@ static void parse_config(const char **arg, char *key, char *val, char *ident)
 	*arg = strbuf_detach(&value, NULL);
 }
 
-static int read_config_file(struct ndctl_ctx *ctx, struct monitor *_monitor,
-		struct util_filter_params *_param)
+static int parse_monitor_config(const struct config *configs,
+					const char *config_file)
 {
 	FILE *f;
 	size_t len = 0;
 	int line = 0, rc = 0;
-	char *buf = NULL, *seek, *value, *config_file;
-
-	if (_monitor->config_file)
-		config_file = strdup(_monitor->config_file);
-	else
-		config_file = strdup(NDCTL_CONF_FILE);
-	if (!config_file) {
-		fail("strdup default config file failed\n");
-		rc = -ENOMEM;
-		goto out;
-	}
+	char *buf = NULL, *seek, *value;
 
 	buf = malloc(BUF_SIZE);
 	if (!buf) {
 		fail("malloc read config-file buf error\n");
-		rc = -ENOMEM;
-		goto out;
+		return -ENOMEM;
 	}
 	seek = buf;
 
 	f = fopen(config_file, "r");
 	if (!f) {
-		if (_monitor->config_file) {
-			err(&monitor, "config-file: %s cannot be opened\n",
-				config_file);
-			rc = -errno;
-		}
+		err(&monitor, "%s cannot be opened\n", config_file);
+		rc = -errno;
 		goto out;
 	}
 
@@ -554,19 +510,18 @@ static int read_config_file(struct ndctl_ctx *ctx, struct monitor *_monitor,
 		if (len == 0)
 			continue;
 
-		parse_config(&_param->bus, "bus", value, seek);
-		parse_config(&_param->dimm, "dimm", value, seek);
-		parse_config(&_param->region, "region", value, seek);
-		parse_config(&_param->namespace, "namespace", value, seek);
-		parse_config(&_monitor->dimm_event, "dimm-event", value, seek);
+		set_monitor_conf(&param.bus, "bus", value, seek);
+		set_monitor_conf(&param.dimm, "dimm", value, seek);
+		set_monitor_conf(&param.region, "region", value, seek);
+		set_monitor_conf(&param.namespace, "namespace", value, seek);
+		set_monitor_conf(&monitor.dimm_event, "dimm-event", value, seek);
 
-		if (!_monitor->log)
-			parse_config(&_monitor->log, "log", value, seek);
+		if (!monitor.log)
+			set_monitor_conf(&monitor.log, "log", value, seek);
 	}
 	fclose(f);
 out:
 	free(buf);
-	free(config_file);
 	return rc;
 }
 
@@ -585,8 +540,8 @@ int cmd_monitor(int argc, const char **argv, struct ndctl_ctx *ctx)
 		OPT_FILENAME('l', "log", &monitor.log,
 				"<file> | syslog | standard",
 				"where to output the monitor's notification"),
-		OPT_FILENAME('c', "config-file", &monitor.config_file,
-				"config-file", "override the default config"),
+		OPT_STRING('c', "config-file", &monitor.configs,
+				"config-file", "override default configs"),
 		OPT_BOOLEAN('\0', "daemon", &monitor.daemon,
 				"run ndctl monitor as a daemon"),
 		OPT_BOOLEAN('u', "human", &monitor.human,
@@ -601,10 +556,25 @@ int cmd_monitor(int argc, const char **argv, struct ndctl_ctx *ctx)
 		"ndctl monitor [<options>]",
 		NULL
 	};
-	const char *prefix = "./";
-	struct util_filter_ctx fctx = { 0 };
+	struct config configs[] = {
+		CONF_MONITOR(NDCTL_CONF_FILE, parse_monitor_config),
+		CONF_STR("core:bus", &param.bus, NULL),
+		CONF_STR("core:region", &param.region, NULL),
+		CONF_STR("core:dimm", &param.dimm, NULL),
+		CONF_STR("core:namespace", &param.namespace, NULL),
+		CONF_STR("monitor:bus", &param.bus, NULL),
+		CONF_STR("monitor:region", &param.region, NULL),
+		CONF_STR("monitor:dimm", &param.dimm, NULL),
+		CONF_STR("monitor:namespace", &param.namespace, NULL),
+		CONF_STR("monitor:dimm-event", &monitor.dimm_event, NULL),
+		CONF_END(),
+	};
+	const char *prefix = "./", *ndctl_configs;
+	struct ndctl_filter_ctx fctx = { 0 };
 	struct monitor_filter_arg mfa = { 0 };
-	int i, rc;
+	int i, rc = 0;
+	struct stat st;
+	char *path = NULL;
 
 	argc = parse_options_prefix(argc, argv, prefix, options, u, 0);
 	for (i = 0; i < argc; i++) {
@@ -621,20 +591,32 @@ int cmd_monitor(int argc, const char **argv, struct ndctl_ctx *ctx)
 	else
 		monitor.ctx.log_priority = LOG_INFO;
 
-	rc = read_config_file(ctx, &monitor, &param);
-	if (rc)
-		goto out;
+	ndctl_configs = ndctl_get_config_path(ctx);
+	if (!monitor.configs && ndctl_configs) {
+		rc = asprintf(&path, "%s/monitor.conf", ndctl_configs);
+		if (rc < 0)
+			goto out;
+
+		if (stat(path, &st) == 0)
+			monitor.configs = path;
+	}
+	if (monitor.configs) {
+		configs[0].key = monitor.configs;
+		rc = parse_configs_prefix(monitor.configs, prefix, configs);
+		if (rc)
+			goto out;
+	}
 
 	if (monitor.log) {
 		if (strncmp(monitor.log, "./", 2) != 0)
 			fix_filename(prefix, (const char **)&monitor.log);
-		if (strncmp(monitor.log, "./syslog", 8) == 0)
+		if (strcmp(monitor.log, "./syslog") == 0)
 			monitor.ctx.log_fn = log_syslog;
-		else if (strncmp(monitor.log, "./standard", 10) == 0)
+		else if (strcmp(monitor.log, "./standard") == 0)
 			monitor.ctx.log_fn = log_standard;
 		else {
-			monitor.log_file = fopen(monitor.log, "a+");
-			if (!monitor.log_file) {
+			monitor.ctx.log_file = fopen(monitor.log, "a+");
+			if (!monitor.ctx.log_file) {
 				error("open %s failed\n", monitor.log);
 				rc = -errno;
 				goto out;
@@ -666,7 +648,7 @@ int cmd_monitor(int argc, const char **argv, struct ndctl_ctx *ctx)
 	mfa.maxfd_dimm = -1;
 	mfa.flags = 0;
 
-	rc = util_filter_walk(ctx, &fctx, &param);
+	rc = ndctl_filter_walk(ctx, &fctx, &param);
 	if (rc)
 		goto out;
 
@@ -679,7 +661,9 @@ int cmd_monitor(int argc, const char **argv, struct ndctl_ctx *ctx)
 
 	rc = monitor_event(ctx, &mfa);
 out:
-	if (monitor.log_file)
-		fclose(monitor.log_file);
+	if (monitor.ctx.log_file)
+		fclose(monitor.ctx.log_file);
+	if (path)
+		free(path);
 	return rc;
 }

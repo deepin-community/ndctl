@@ -24,7 +24,8 @@
 	__func__, __LINE__, strerror(errno))
 #define faili(i) fprintf(stderr, "%s: failed at: %d: %d (%s)\n", \
 	__func__, __LINE__, i, strerror(errno))
-#define TEST_FILE "test_dax_data"
+#define TEST_DIR "test_dax_mnt"
+#define TEST_FILE TEST_DIR "/test_dax_data"
 
 #define REGION_MEM_SIZE 4096*4
 #define REGION_PM_SIZE        4096*512
@@ -69,6 +70,11 @@ int test_dax_remap(struct ndctl_test *test, int dax_fd, unsigned long align, voi
 
 	remap = mremap(addr, REMAP_SIZE, REMAP_SIZE, MREMAP_MAYMOVE|MREMAP_FIXED, anon);
 
+	if (remap == MAP_FAILED) {
+		fprintf(stderr, "%s: mremap failed, that's ok too\n", __func__);
+		return 0;
+	}
+
 	if (remap != anon) {
 		rc = -ENXIO;
 		perror("mremap");
@@ -83,20 +89,18 @@ int test_dax_remap(struct ndctl_test *test, int dax_fd, unsigned long align, voi
 	act.sa_flags = SA_SIGINFO;
 	if (sigaction(SIGBUS, &act, 0)) {
 		perror("sigaction");
-		rc = EXIT_FAILURE;
-		goto out;
+		return EXIT_FAILURE;
 	}
 
 	/* test fault after device-dax instance disabled */
 	if (sigsetjmp(sj_env, 1)) {
 		if (!fsdax && align > SZ_4K) {
 			fprintf(stderr, "got expected SIGBUS after mremap() of device-dax\n");
-			rc = 0;
+			return 0;
 		} else {
 			fprintf(stderr, "unpexpected SIGBUS after mremap()\n");
-			rc = -EIO;
+			return -EIO;
 		}
-		goto out;
 	}
 
 	*(int *) anon = 0xAA;
@@ -107,9 +111,7 @@ int test_dax_remap(struct ndctl_test *test, int dax_fd, unsigned long align, voi
 		return -ENXIO;
 	}
 
-	rc = 0;
-out:
-	return rc;
+	return 0;
 }
 
 int test_dax_directio(int dax_fd, unsigned long align, void *dax_addr, off_t offset)
@@ -170,8 +172,14 @@ int test_dax_directio(int dax_fd, unsigned long align, void *dax_addr, off_t off
 		}
 		rc = -ENXIO;
 
+		rc = mkdir(TEST_DIR, 0600);
+		if (rc < 0 && errno != EEXIST) {
+			faili(i);
+			munmap(addr, 2 * align);
+			break;
+		}
 		fd2 = open(TEST_FILE, O_CREAT|O_TRUNC|O_DIRECT|O_RDWR,
-				DEFFILEMODE);
+				0600);
 		if (fd2 < 0) {
 			faili(i);
 			munmap(addr, 2*align);

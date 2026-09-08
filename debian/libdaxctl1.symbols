@@ -1,5 +1,6 @@
 libdaxctl.so.1 libdaxctl1 #MINVER#
 * Build-Depends-Package: libdaxctl-dev
+ LIBDAXCTL_10@LIBDAXCTL_10 81
  LIBDAXCTL_1@LIBDAXCTL_1 63
  LIBDAXCTL_2@LIBDAXCTL_2 63
  LIBDAXCTL_3@LIBDAXCTL_3 63
@@ -8,6 +9,7 @@ libdaxctl.so.1 libdaxctl1 #MINVER#
  LIBDAXCTL_6@LIBDAXCTL_6 66
  LIBDAXCTL_7@LIBDAXCTL_7 67
  LIBDAXCTL_8@LIBDAXCTL_8 71
+ LIBDAXCTL_9@LIBDAXCTL_9 72
  daxctl_dev_disable@LIBDAXCTL_6 66
  daxctl_dev_enable_devdax@LIBDAXCTL_6 66
  daxctl_dev_enable_ram@LIBDAXCTL_6 66
@@ -24,10 +26,14 @@ libdaxctl.so.1 libdaxctl1 #MINVER#
  daxctl_dev_get_resource@LIBDAXCTL_6 66
  daxctl_dev_get_size@LIBDAXCTL_2 63
  daxctl_dev_get_target_node@LIBDAXCTL_6 66
+ daxctl_dev_has_online_memory@LIBDAXCTL_9 72
  daxctl_dev_is_enabled@LIBDAXCTL_6 66
+ daxctl_dev_is_system_ram_capable@LIBDAXCTL_10 81
  daxctl_dev_set_align@LIBDAXCTL_8 71
  daxctl_dev_set_mapping@LIBDAXCTL_8 71
  daxctl_dev_set_size@LIBDAXCTL_8 71
+ daxctl_dev_will_auto_online_memory@LIBDAXCTL_9 72
+ daxctl_get_config_path@LIBDAXCTL_9 72
  daxctl_get_log_priority@LIBDAXCTL_1 63
  daxctl_get_userdata@LIBDAXCTL_1 63
  daxctl_mapping_get_end@LIBDAXCTL_8 71
@@ -63,6 +69,7 @@ libdaxctl.so.1 libdaxctl1 #MINVER#
  daxctl_region_get_uuid@LIBDAXCTL_2 63
  daxctl_region_ref@LIBDAXCTL_2 63
  daxctl_region_unref@LIBDAXCTL_2 63
+ daxctl_set_config_path@LIBDAXCTL_9 72
  daxctl_set_log_fn@LIBDAXCTL_1 63
  daxctl_set_log_priority@LIBDAXCTL_1 63
  daxctl_set_userdata@LIBDAXCTL_1 63
