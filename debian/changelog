@@ -1,3 +1,108 @@
+ndctl (81-1) unstable; urgency=medium
+
+  * New upstream release.
+
+ -- Adam Borowski <kilobyte@angband.pl>  Mon, 14 Apr 2025 00:12:58 +0200
+
+ndctl (77-2.2) unstable; urgency=medium
+
+  * Non-maintainer upload.
+  * Build-Depend on systemd-dev for systemdunitdir, udevrulesdir.
+    Enable systemd build option.
+    Patch daxctl udev rules instead of using debian-specific file.
+    (Closes: #1073734)
+
+ -- Chris Hofstaedtler <zeha@debian.org>  Tue, 30 Jul 2024 14:27:43 +0200
+
+ndctl (77-2.1) unstable; urgency=medium
+
+  * Non-maintainer upload.
+  * Install systemd units into /usr. (Closes: #1073734)
+  * Update Build-Depends: pkg-config to pkgconf.
+
+ -- Chris Hofstaedtler <zeha@debian.org>  Thu, 18 Jul 2024 20:46:07 +0200
+
+ndctl (77-2) unstable; urgency=medium
+
+  * Upload to unstable.
+
+ -- Adam Borowski <kilobyte@angband.pl>  Sun, 11 Jun 2023 20:35:11 +0200
+
+ndctl (77-1) experimental; urgency=medium
+
+  * New upstream release.
+  * Split out cxl into its own package.
+  * Drop obsolete README.Debian.
+  * Update libcxl's symbols.
+  * Add and install a .service and init script for cxl-monitor.
+
+ -- Adam Borowski <kilobyte@angband.pl>  Wed, 03 May 2023 17:19:40 +0200
+
+ndctl (76.1-1) unstable; urgency=medium
+
+  * Freshest upstream fixes...
+
+ -- Adam Borowski <kilobyte@angband.pl>  Fri, 24 Feb 2023 22:35:47 +0100
+
+ndctl (76-1) unstable; urgency=medium
+
+  * New upstream release (mostly fixes).
+  * Add libtrace{fs,event} to B-Deps.
+  * No cxl-monitor automation for now (b/c freeze).
+
+ -- Adam Borowski <kilobyte@angband.pl>  Thu, 23 Feb 2023 01:16:24 +0100
+
+ndctl (75-1) unstable; urgency=medium
+
+  * New upstream release.
+  * Drop pre-buster relations.
+  * Update symbols.
+
+ -- Adam Borowski <kilobyte@angband.pl>  Sat, 14 Jan 2023 17:19:15 +0100
+
+ndctl (74-2) unstable; urgency=medium
+
+  [ Helmut Grohne ]
+  * Fix FTCBFS: (Closes: #1019490)
+    + cross.patch: Avoid an unnecessary compiler run test.
+    + Fix confusion of build and host.
+
+ -- Adam Borowski <kilobyte@angband.pl>  Sun, 09 Oct 2022 21:07:29 +0200
+
+ndctl (74-1) unstable; urgency=medium
+
+  * New upstream release.
+  * Update symbols for libcxl.
+  * udev rule to configure dax devices at boot.
+
+ -- Adam Borowski <kilobyte@angband.pl>  Wed, 24 Aug 2022 12:53:47 +0200
+
+ndctl (73-2) unstable; urgency=medium
+
+  [ Gianfranco Costamagna ]
+  * Convert the new test link to a multi-arch working example
+    (taken from libsdl2 tests)
+
+ -- Adam Borowski <kilobyte@angband.pl>  Sat, 28 May 2022 20:42:20 +0200
+
+ndctl (73-1) unstable; urgency=medium
+
+  * New upstream release.
+  * Meson.
+  * Trim unused files from the copyright file.
+  * Add an autopkgtest for library header/runtime placements.
+
+ -- Adam Borowski <kilobyte@angband.pl>  Mon, 16 May 2022 17:33:13 +0200
+
+ndctl (72.1-1) unstable; urgency=medium
+
+  * New upstream release.
+  * Add libiniparser-dev to B-Deps, insert its path via CPPFLAGS.
+  * New library: libcxl.
+  * No devdax udev integration yet...
+
+ -- Adam Borowski <kilobyte@angband.pl>  Mon, 24 Jan 2022 15:19:15 +0100
+
 ndctl (71.1-1) unstable; urgency=medium
 
   * New upstream bugfix release.

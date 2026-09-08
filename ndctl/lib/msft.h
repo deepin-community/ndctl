@@ -2,20 +2,15 @@
 /* Copyright (C) 2016-2017 Dell, Inc. */
 /* Copyright (C) 2016 Hewlett Packard Enterprise Development LP */
 /* Copyright (C) 2014-2020, Intel Corporation. */
+/* Copyright (C) 2022 iXsystems, Inc. */
 #ifndef __NDCTL_MSFT_H__
 #define __NDCTL_MSFT_H__
 
 enum {
-	NDN_MSFT_CMD_QUERY = 0,
-
-	/* non-root commands */
-	NDN_MSFT_CMD_SMART = 11,
+	NDN_MSFT_CMD_CHEALTH = 10,
+	NDN_MSFT_CMD_NHEALTH = 11,
+	NDN_MSFT_CMD_EHEALTH = 12,
 };
-
-/* NDN_MSFT_CMD_SMART */
-#define NDN_MSFT_SMART_HEALTH_VALID	ND_SMART_HEALTH_VALID
-#define NDN_MSFT_SMART_TEMP_VALID	ND_SMART_TEMP_VALID
-#define NDN_MSFT_SMART_USED_VALID	ND_SMART_USED_VALID
 
 /*
  * This is actually function 11 data,
@@ -49,5 +44,11 @@ struct ndn_pkg_msft {
 	struct nd_cmd_pkg	gen;
 	union ndn_msft_cmd	u;
 } __attribute__((packed));
+
+#define NDN_MSFT_STATUS_MASK		0xffff
+#define NDN_MSFT_STATUS_SUCCESS	0
+#define NDN_MSFT_STATUS_NOTSUPP	1
+#define NDN_MSFT_STATUS_INVALPARM	2
+#define NDN_MSFT_STATUS_I2CERR		3
 
 #endif /* __NDCTL_MSFT_H__ */

@@ -37,6 +37,7 @@ struct daxctl_ctx {
 	struct log_ctx ctx;
 	int refcount;
 	void *userdata;
+	const char *config_path;
 	int regions_init;
 	struct list_head regions;
 	struct kmod_ctx *kmod_ctx;
@@ -66,6 +67,22 @@ DAXCTL_EXPORT void daxctl_set_userdata(struct daxctl_ctx *ctx, void *userdata)
 	if (ctx == NULL)
 		return;
 	ctx->userdata = userdata;
+}
+
+DAXCTL_EXPORT int daxctl_set_config_path(struct daxctl_ctx *ctx,
+					 char *config_path)
+{
+	if ((!ctx) || (!config_path))
+		return -EINVAL;
+	ctx->config_path = config_path;
+	return 0;
+}
+
+DAXCTL_EXPORT const char *daxctl_get_config_path(struct daxctl_ctx *ctx)
+{
+	if (ctx == NULL)
+		return NULL;
+	return ctx->config_path;
 }
 
 /**
@@ -99,6 +116,9 @@ DAXCTL_EXPORT int daxctl_new(struct daxctl_ctx **ctx)
 	*ctx = c;
 	list_head_init(&c->regions);
 	c->kmod_ctx = kmod_ctx;
+	rc = daxctl_set_config_path(c, DAXCTL_CONF_DIR);
+	if (rc)
+		dbg(c, "Unable to set config path: %s\n", strerror(-rc));
 
 	return 0;
 out:
@@ -365,7 +385,7 @@ static bool device_model_is_dax_bus(struct daxctl_dev *dev)
 	return false;
 }
 
-static int dev_is_system_ram_capable(struct daxctl_dev *dev)
+DAXCTL_EXPORT int daxctl_dev_is_system_ram_capable(struct daxctl_dev *dev)
 {
 	const char *devname = daxctl_dev_get_devname(dev);
 	struct daxctl_ctx *ctx = daxctl_dev_get_ctx(dev);
@@ -412,7 +432,7 @@ static struct daxctl_memory *daxctl_dev_alloc_mem(struct daxctl_dev *dev)
 	char buf[SYSFS_ATTR_SIZE];
 	int node_num;
 
-	if (!dev_is_system_ram_capable(dev))
+	if (!daxctl_dev_is_system_ram_capable(dev))
 		return NULL;
 
 	mem = calloc(1, sizeof(*mem));
@@ -604,10 +624,9 @@ DAXCTL_EXPORT int daxctl_region_create_dev(struct daxctl_region *region)
 	}
 
 	rc = sysfs_write_attr(ctx, path, num_devices);
-	if (rc)
-		return rc;
+	free(num_devices);
 
-	return 0;
+	return rc;
 }
 
 DAXCTL_EXPORT int daxctl_region_destroy_dev(struct daxctl_region *region,
@@ -1291,6 +1310,37 @@ static int memblock_is_online(struct daxctl_memory *mem, char *memblock)
 	return 0;
 }
 
+static int memblock_is_removable(struct daxctl_memory *mem, char *memblock)
+{
+	struct daxctl_dev *dev = daxctl_memory_get_dev(mem);
+	const char *devname = daxctl_dev_get_devname(dev);
+	struct daxctl_ctx *ctx = daxctl_dev_get_ctx(dev);
+	int len = mem->buf_len, rc;
+	char buf[SYSFS_ATTR_SIZE];
+	char *path = mem->mem_buf;
+	const char *node_path;
+
+	node_path = daxctl_memory_get_node_path(mem);
+	if (!node_path)
+		return -ENXIO;
+
+	rc = snprintf(path, len, "%s/%s/removable", node_path, memblock);
+	if (rc < 0)
+		return -ENOMEM;
+
+	rc = sysfs_read_attr(ctx, path, buf);
+	if (rc) {
+		err(ctx, "%s: Failed to read %s: %s\n",
+			devname, path, strerror(-rc));
+		return rc;
+	}
+
+	if (strtoul(buf, NULL, 0) == 0)
+		return -EOPNOTSUPP;
+
+	return 0;
+}
+
 static int online_one_memblock(struct daxctl_memory *mem, char *memblock,
 		enum memory_zones zone, int *status)
 {
@@ -1343,6 +1393,20 @@ static int offline_one_memblock(struct daxctl_memory *mem, char *memblock)
 	char *path = mem->mem_buf;
 	const char *node_path;
 
+	/* if already offline, there is nothing to do */
+	rc = memblock_is_online(mem, memblock);
+	if (rc < 0)
+		return rc;
+	if (!rc)
+		return 1;
+
+	rc = memblock_is_removable(mem, memblock);
+	if (rc) {
+		if (rc == -EOPNOTSUPP)
+			err(ctx, "%s: %s is unremovable\n", devname, memblock);
+		return rc;
+	}
+
 	node_path = daxctl_memory_get_node_path(mem);
 	if (!node_path)
 		return -ENXIO;
@@ -1350,13 +1414,6 @@ static int offline_one_memblock(struct daxctl_memory *mem, char *memblock)
 	rc = snprintf(path, len, "%s/%s/state", node_path, memblock);
 	if (rc < 0)
 		return -ENOMEM;
-
-	/* if already offline, there is nothing to do */
-	rc = memblock_is_online(mem, memblock);
-	if (rc < 0)
-		return rc;
-	if (!rc)
-		return 1;
 
 	rc = sysfs_write_attr_quiet(ctx, path, mode);
 	if (rc) {
@@ -1458,7 +1515,7 @@ static int memblock_in_dev(struct daxctl_memory *mem, const char *memblock)
 		err(ctx, "%s: Unable to determine resource\n", devname);
 		return -EACCES;
 	}
-	dev_end = dev_start + daxctl_dev_get_size(dev);
+	dev_end = dev_start + daxctl_dev_get_size(dev) - 1;
 
 	memblock_size = daxctl_memory_get_block_size(mem);
 	if (!memblock_size) {
@@ -1533,6 +1590,8 @@ static int daxctl_memory_op(struct daxctl_memory *mem, enum memory_op op)
 	errno = 0;
 	while ((de = readdir(node_dir)) != NULL) {
 		if (strncmp(de->d_name, "memory", 6) == 0) {
+			if (strncmp(de->d_name, "memory_", 7) == 0)
+				continue;
 			rc = memblock_in_dev(mem, de->d_name);
 			if (rc < 0)
 				goto out_dir;
@@ -1595,7 +1654,7 @@ static int daxctl_memory_online_with_zone(struct daxctl_memory *mem,
 	 */
 	mem->zone = 0;
 	rc = daxctl_memory_op(mem, MEM_GET_ZONE);
-	if (rc)
+	if (rc < 0)
 		return rc;
 	if (mem->zone != zone) {
 		err(ctx,
@@ -1643,4 +1702,35 @@ DAXCTL_EXPORT int daxctl_memory_is_movable(struct daxctl_memory *mem)
 	if (rc < 0)
 		return rc;
 	return (mem->zone == MEM_ZONE_MOVABLE) ? 1 : 0;
+}
+
+DAXCTL_EXPORT int daxctl_dev_will_auto_online_memory(struct daxctl_dev *dev)
+{
+	const char *auto_path = "/sys/devices/system/memory/auto_online_blocks";
+	const char *devname = daxctl_dev_get_devname(dev);
+	struct daxctl_ctx *ctx = daxctl_dev_get_ctx(dev);
+	char buf[SYSFS_ATTR_SIZE];
+
+	/*
+	 * If we can't read the policy for some reason, don't fail yet. Assume
+	 * the auto-onlining policy is absent, and carry on. If onlining blocks
+	 * does result in the memory being in an inconsistent state, we have a
+	 * check and warning for it after the fact
+	 */
+	if (sysfs_read_attr(ctx, auto_path, buf) != 0)
+		err(ctx, "%s: Unable to determine auto-online policy: %s\n",
+				devname, strerror(errno));
+
+	/* match both "online" and "online_movable" */
+	return !strncmp(buf, "online", 6);
+}
+
+DAXCTL_EXPORT int daxctl_dev_has_online_memory(struct daxctl_dev *dev)
+{
+	struct daxctl_memory *mem = daxctl_dev_get_memory(dev);
+
+	if (mem)
+		return daxctl_memory_is_online(mem);
+	else
+		return 0;
 }

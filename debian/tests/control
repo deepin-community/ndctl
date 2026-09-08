@@ -3,3 +3,9 @@ Depends: ndctl
 
 Tests: daxctl-commands
 Depends: daxctl
+
+# Installed headers have been moved in the past, and the build system places
+# binary libs in a weird place.
+Tests: link-libraries
+Depends: build-essential, pkg-config, libcxl-dev, libndctl-dev, libdaxctl-dev
+Restrictions: allow-stderr

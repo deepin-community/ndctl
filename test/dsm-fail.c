@@ -14,8 +14,8 @@
 
 #include <ccan/array_size/array_size.h>
 #include <ndctl/libndctl.h>
-#include <builtin.h>
-#include <ndctl.h>
+#include <ndctl/builtin.h>
+#include <ndctl/ndctl.h>
 #include <test.h>
 
 #define DIMM_PATH "/sys/devices/platform/nfit_test.0/nfit_test_dimm/test_dimm0"
@@ -346,7 +346,7 @@ int test_dsm_fail(int loglevel, struct ndctl_test *test, struct ndctl_ctx *ctx)
 	int result = EXIT_FAILURE, err;
 
 	ndctl_set_log_priority(ctx, loglevel);
-	err = nfit_test_init(&kmod_ctx, &mod, NULL, loglevel, test);
+	err = ndctl_test_init(&kmod_ctx, &mod, NULL, loglevel, test);
 	if (err < 0) {
 		result = 77;
 		ndctl_test_skip(test);

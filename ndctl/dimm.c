@@ -11,7 +11,6 @@
 #include <util/size.h>
 #include <uuid/uuid.h>
 #include <util/json.h>
-#include <util/filter.h>
 #include <json-c/json.h>
 #include <util/fletcher.h>
 #include <ndctl/libndctl.h>
@@ -20,7 +19,10 @@
 #include <ccan/minmax/minmax.h>
 #include <ccan/array_size/array_size.h>
 #include <ndctl/firmware-update.h>
-#include <util/keys.h>
+
+#include "filter.h"
+#include "json.h"
+#include "keys.h"
 
 static const char *cmd_name = "dimm";
 static int err_count;
@@ -94,21 +96,25 @@ static struct json_object *dump_label_json(struct ndctl_dimm *dimm,
 	struct json_object *jarray = json_object_new_array();
 	struct json_object *jlabel = NULL;
 	struct namespace_label nslabel;
-	unsigned int slot = -1;
+	unsigned int nsindex_size;
+	unsigned int slot = 0;
 	ssize_t offset;
 
 	if (!jarray)
 		return NULL;
 
-	for (offset = NSINDEX_ALIGN * 2; offset < size;
-			offset += ndctl_dimm_sizeof_namespace_label(dimm)) {
+	nsindex_size = ndctl_dimm_sizeof_namespace_index(dimm);
+	if (nsindex_size == 0)
+		return NULL;
+
+	for (offset = nsindex_size * 2; offset < size;
+	     offset += ndctl_dimm_sizeof_namespace_label(dimm), slot++) {
 		ssize_t len = min_t(ssize_t,
 				ndctl_dimm_sizeof_namespace_label(dimm),
 				size - offset);
 		struct json_object *jobj;
 		char uuid[40];
 
-		slot++;
 		jlabel = json_object_new_object();
 		if (!jlabel)
 			break;
@@ -161,7 +167,7 @@ static struct json_object *dump_label_json(struct ndctl_dimm *dimm,
 			break;
 		json_object_object_add(jlabel, "isetcookie", jobj);
 
-		jobj = json_object_new_int64(le64_to_cpu(nslabel.lbasize));
+		jobj = util_json_new_u64(le64_to_cpu(nslabel.lbasize));
 		if (!jobj)
 			break;
 		json_object_object_add(jlabel, "lbasize", jobj);
@@ -204,17 +210,23 @@ static struct json_object *dump_label_json(struct ndctl_dimm *dimm,
 	return jarray;
 }
 
-static struct json_object *dump_index_json(struct ndctl_cmd *cmd_read, ssize_t size)
+static struct json_object *dump_index_json(struct ndctl_dimm *dimm,
+		struct ndctl_cmd *cmd_read, ssize_t size)
 {
 	struct json_object *jarray = json_object_new_array();
 	struct json_object *jindex = NULL;
 	struct namespace_index nsindex;
+	unsigned int nsindex_size;
 	ssize_t offset;
 
 	if (!jarray)
 		return NULL;
 
-	for (offset = 0; offset < NSINDEX_ALIGN * 2; offset += NSINDEX_ALIGN) {
+	nsindex_size = ndctl_dimm_sizeof_namespace_index(dimm);
+	if (nsindex_size == 0)
+		return NULL;
+
+	for (offset = 0; offset < nsindex_size * 2; offset += nsindex_size) {
 		ssize_t len = min_t(ssize_t, sizeof(nsindex), size - offset);
 		struct json_object *jobj;
 
@@ -288,7 +300,7 @@ static struct json_object *dump_json(struct ndctl_dimm *dimm,
 		goto err;
 	json_object_object_add(jdimm, "dev", jobj);
 
-	jindex = dump_index_json(cmd_read, size);
+	jindex = dump_index_json(dimm, cmd_read, size);
 	if (!jindex)
 		goto err;
 	json_object_object_add(jdimm, "index", jindex);
@@ -341,6 +353,23 @@ static int rw_bin(FILE *f, struct ndctl_cmd *cmd, ssize_t size,
 	return 0;
 }
 
+static int revalidate_labels(struct ndctl_dimm *dimm)
+{
+	int rc;
+
+	/*
+	 * If the dimm is already disabled the kernel is not holding a cached
+	 * copy of the label space.
+	 */
+	if (!ndctl_dimm_is_enabled(dimm))
+		return 0;
+
+	rc = ndctl_dimm_disable(dimm);
+	if (rc)
+		return rc;
+	return ndctl_dimm_enable(dimm);
+}
+
 static int action_write(struct ndctl_dimm *dimm, struct action_context *actx)
 {
 	struct ndctl_cmd *cmd_read, *cmd_write;
@@ -364,18 +393,10 @@ static int action_write(struct ndctl_dimm *dimm, struct action_context *actx)
 
 	size = ndctl_cmd_cfg_read_get_size(cmd_read);
 	rc = rw_bin(actx->f_in, cmd_write, size, param.offset, WRITE);
-
-	/*
-	 * If the dimm is already disabled the kernel is not holding a cached
-	 * copy of the label space.
-	 */
-	if (!ndctl_dimm_is_enabled(dimm))
-		goto out;
-
-	rc = ndctl_dimm_disable(dimm);
 	if (rc)
 		goto out;
-	rc = ndctl_dimm_enable(dimm);
+
+	rc = revalidate_labels(dimm);
 
  out:
 	ndctl_cmd_unref(cmd_read);
@@ -1006,7 +1027,8 @@ static int action_remove_passphrase(struct ndctl_dimm *dimm,
 		return -EOPNOTSUPP;
 	}
 
-	return ndctl_dimm_remove_key(dimm);
+	return ndctl_dimm_remove_key(dimm, param.master_pass ? ND_MASTER_KEY :
+							       ND_USER_KEY);
 }
 
 static int action_security_freeze(struct ndctl_dimm *dimm,
@@ -1030,7 +1052,7 @@ static int action_security_freeze(struct ndctl_dimm *dimm,
 static int action_sanitize_dimm(struct ndctl_dimm *dimm,
 		struct action_context *actx)
 {
-	int rc;
+	int rc = 0;
 	enum ndctl_key_type key_type;
 
 	if (ndctl_dimm_get_security(dimm) < 0) {
@@ -1072,9 +1094,10 @@ static int action_sanitize_dimm(struct ndctl_dimm *dimm,
 		rc = ndctl_dimm_overwrite_key(dimm);
 		if (rc < 0)
 			return rc;
+		rc = revalidate_labels(dimm);
 	}
 
-	return 0;
+	return rc;
 }
 
 static int action_wait_overwrite(struct ndctl_dimm *dimm,
@@ -1258,6 +1281,12 @@ static const struct option key_options[] = {
 static const struct option sanitize_options[] = {
 	BASE_OPTIONS(),
 	SANITIZE_OPTIONS(),
+	MASTER_OPTIONS(),
+	OPT_END(),
+};
+
+static const struct option remove_options[] = {
+	BASE_OPTIONS(),
 	MASTER_OPTIONS(),
 	OPT_END(),
 };
@@ -1563,9 +1592,9 @@ int cmd_setup_passphrase(int argc, const char **argv, struct ndctl_ctx *ctx)
 
 int cmd_remove_passphrase(int argc, const char **argv, void *ctx)
 {
-	int count = dimm_action(argc, argv, ctx, action_remove_passphrase,
-			base_options,
-			"ndctl remove-passphrase <nmem0> [<nmem1>..<nmemN>] [<options>]");
+	int count = dimm_action(
+		argc, argv, ctx, action_remove_passphrase, remove_options,
+		"ndctl remove-passphrase <nmem0> [<nmem1>..<nmemN>] [<options>]");
 
 	fprintf(stderr, "passphrase removed for %d nmem%s.\n", count >= 0 ? count : 0,
 			count > 1 ? "s" : "");

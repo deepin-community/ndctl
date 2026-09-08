@@ -8,15 +8,20 @@
 #include <limits.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <uuid/uuid.h>
 #include <sys/sysmacros.h>
 #include <util/size.h>
 #include <util/json.h>
-#include <util/filter.h>
 #include <json-c/json.h>
 #include <json-c/json_util.h>
+#include <ndctl/libndctl.h>
 #include <daxctl/libdaxctl.h>
 #include <util/parse-options.h>
+#include <util/parse-configs.h>
 #include <ccan/array_size/array_size.h>
+
+#include "filter.h"
+#include "json.h"
 
 static struct {
 	const char *dev;
@@ -25,6 +30,7 @@ static struct {
 	const char *size;
 	const char *align;
 	const char *input;
+	bool check_config;
 	bool no_online;
 	bool no_movable;
 	bool force;
@@ -49,12 +55,6 @@ static unsigned long flags;
 static struct mapping *maps = NULL;
 static long long nmaps = -1;
 
-enum memory_zone {
-	MEM_ZONE_MOVABLE,
-	MEM_ZONE_NORMAL,
-};
-static enum memory_zone mem_zone = MEM_ZONE_MOVABLE;
-
 enum device_action {
 	ACTION_RECONFIG,
 	ACTION_ONLINE,
@@ -64,6 +64,9 @@ enum device_action {
 	ACTION_ENABLE,
 	ACTION_DESTROY,
 };
+
+#define CONF_SECTION		"reconfigure-device"
+#define CONF_NVDIMM_UUID_STR	"nvdimm.uuid"
 
 #define BASE_OPTIONS() \
 OPT_STRING('r', "region", &param.region, "region-id", "filter by region"), \
@@ -75,7 +78,9 @@ OPT_STRING('m', "mode", &param.mode, "mode", "mode to switch the device to"), \
 OPT_BOOLEAN('N', "no-online", &param.no_online, \
 	"don't auto-online memory sections"), \
 OPT_BOOLEAN('f', "force", &param.force, \
-		"attempt to offline memory sections before reconfiguration")
+		"attempt to offline memory sections before reconfiguration"), \
+OPT_BOOLEAN('C', "check-config", &param.check_config, \
+		"use config files to determine parameters for the operation")
 
 #define CREATE_OPTIONS() \
 OPT_STRING('s', "size", &param.size, "size", "size to switch the device to"), \
@@ -93,8 +98,6 @@ OPT_BOOLEAN('\0', "no-movable", &param.no_movable, \
 static const struct option create_options[] = {
 	BASE_OPTIONS(),
 	CREATE_OPTIONS(),
-	RECONFIG_OPTIONS(),
-	ZONE_OPTIONS(),
 	OPT_END(),
 };
 
@@ -218,6 +221,137 @@ err:
 	return rc;
 }
 
+static int conf_string_to_bool(const char *str)
+{
+	if (!str)
+		return INT_MAX;
+	if (strncmp(str, "t", 1) == 0 ||
+			strncmp(str, "T", 1) == 0 ||
+			strncmp(str, "y", 1) == 0 ||
+			strncmp(str, "Y", 1) == 0 ||
+			strncmp(str, "1", 1) == 0)
+		return true;
+	if (strncmp(str, "f", 1) == 0 ||
+			strncmp(str, "F", 1) == 0 ||
+			strncmp(str, "n", 1) == 0 ||
+			strncmp(str, "N", 1) == 0 ||
+			strncmp(str, "0", 1) == 0)
+		return false;
+	return INT_MAX;
+}
+
+#define conf_assign_inverted_bool(p, conf_var) \
+do { \
+	if (conf_string_to_bool(conf_var) != INT_MAX) \
+		param.p = !conf_string_to_bool(conf_var); \
+} while(0)
+
+static int parse_config_reconfig_set_params(struct daxctl_ctx *ctx, const char *device,
+					    const char *uuid)
+{
+	const char *conf_online = NULL, *conf_movable = NULL;
+	const struct config configs[] = {
+		CONF_SEARCH(CONF_SECTION, CONF_NVDIMM_UUID_STR, uuid,
+			    "mode", &param.mode, NULL),
+		CONF_SEARCH(CONF_SECTION, CONF_NVDIMM_UUID_STR, uuid,
+			    "online", &conf_online, NULL),
+		CONF_SEARCH(CONF_SECTION, CONF_NVDIMM_UUID_STR, uuid,
+			    "movable", &conf_movable, NULL),
+		CONF_END(),
+	};
+	const char *prefix = "./", *daxctl_configs;
+	int rc;
+
+	daxctl_configs = daxctl_get_config_path(ctx);
+	if (daxctl_configs == NULL)
+		return 0;
+
+	rc = parse_configs_prefix(daxctl_configs, prefix, configs);
+	if (rc < 0)
+		return rc;
+
+	conf_assign_inverted_bool(no_online, conf_online);
+	conf_assign_inverted_bool(no_movable, conf_movable);
+
+	return 0;
+}
+
+static bool daxctl_ndns_has_device(struct ndctl_namespace *ndns,
+				    const char *device)
+{
+	struct daxctl_region *dax_region;
+	struct ndctl_dax *dax;
+
+	dax = ndctl_namespace_get_dax(ndns);
+	if (!dax)
+		return false;
+
+	dax_region = ndctl_dax_get_daxctl_region(dax);
+	if (dax_region) {
+		struct daxctl_dev *dev;
+
+		dev = daxctl_dev_get_first(dax_region);
+		if (dev) {
+			if (strcmp(daxctl_dev_get_devname(dev), device) == 0)
+				return true;
+		}
+	}
+	return false;
+}
+
+static int parse_config_reconfig(struct daxctl_ctx *ctx, const char *device)
+{
+	struct ndctl_namespace *ndns;
+	struct ndctl_ctx *ndctl_ctx;
+	struct ndctl_region *region;
+	struct ndctl_bus *bus;
+	struct ndctl_dax *dax;
+	int rc, found = 0;
+	char uuid_buf[40];
+	uuid_t uuid;
+
+	if (strcmp(device, "all") == 0)
+		return 0;
+
+	rc = ndctl_new(&ndctl_ctx);
+	if (rc < 0)
+		return rc;
+
+        ndctl_bus_foreach(ndctl_ctx, bus) {
+		ndctl_region_foreach(bus, region) {
+			ndctl_namespace_foreach(region, ndns) {
+				if (daxctl_ndns_has_device(ndns, device)) {
+					dax = ndctl_namespace_get_dax(ndns);
+					if (!dax)
+						continue;
+					ndctl_dax_get_uuid(dax, uuid);
+					found = 1;
+				}
+			}
+		}
+	}
+
+	if (!found) {
+		fprintf(stderr, "no UUID match for %s found in config files\n",
+			device);
+		return 0;
+	}
+
+	uuid_unparse(uuid, uuid_buf);
+	return parse_config_reconfig_set_params(ctx, device, uuid_buf);
+}
+
+static int parse_device_config(struct daxctl_ctx *ctx, const char *device,
+			       enum device_action action)
+{
+	switch (action) {
+	case ACTION_RECONFIG:
+		return parse_config_reconfig(ctx, device);
+	default:
+		return 0;
+	}
+}
+
 static const char *parse_device_options(int argc, const char **argv,
 		enum device_action action, const struct option *options,
 		const char *usage, struct daxctl_ctx *ctx)
@@ -228,8 +362,11 @@ static const char *parse_device_options(int argc, const char **argv,
 	};
 	unsigned long long units = 1;
 	int i, rc = 0;
+	char *device = NULL;
 
 	argc = parse_options(argc, argv, options, u, 0);
+	if (argc > 0)
+		device = basename(argv[0]);
 
 	/* Handle action-agnostic non-option arguments */
 	if (argc == 0 &&
@@ -263,7 +400,10 @@ static const char *parse_device_options(int argc, const char **argv,
 			action_string);
 		rc = -EINVAL;
 	}
-	for (i = 1; i < argc; i++) {
+
+	/* ACTION_CREATE expects 0 parameters */
+	i = action == ACTION_CREATE ? 0 : 1;
+	for (; i < argc; i++) {
 		fprintf(stderr, "unknown extra parameter \"%s\"\n", argv[i]);
 		rc = -EINVAL;
 	}
@@ -278,6 +418,34 @@ static const char *parse_device_options(int argc, const char **argv,
 		daxctl_set_log_priority(ctx, LOG_DEBUG);
 	if (param.human)
 		flags |= UTIL_JSON_HUMAN;
+
+	/* Scan config file(s) for options. This sets param.foo accordingly */
+	if (device && param.check_config) {
+		if (param.mode || param.no_online || param.no_movable) {
+			fprintf(stderr,
+				"%s: -C cannot be used with --mode, --(no-)movable, or --(no-)online\n",
+				device);
+				usage_with_options(u, options);
+		}
+		rc = parse_device_config(ctx, device, action);
+		if (rc) {
+			fprintf(stderr, "error parsing config file: %s\n",
+				strerror(-rc));
+			return NULL;
+		}
+		if (!param.mode && !param.no_online && !param.no_movable) {
+			fprintf(stderr, "%s: missing or malformed config section\n",
+				device);
+			/*
+			 * Exit with success since the most common case is there is
+			 * no config defined for this device, and we don't want to
+			 * treat that as an error. There isn't an easy way currently
+			 * to distinguish between a malformed config entry from a
+			 * completely missing config section.
+			 */
+			exit(0);
+		}
+	}
 
 	/* Handle action-specific options */
 	switch (action) {
@@ -296,8 +464,6 @@ static const char *parse_device_options(int argc, const char **argv,
 				align = __parse_size64(param.align, &units);
 		} else if (strcmp(param.mode, "system-ram") == 0) {
 			reconfig_mode = DAXCTL_DEV_MODE_RAM;
-			if (param.no_movable)
-				mem_zone = MEM_ZONE_NORMAL;
 		} else if (strcmp(param.mode, "devdax") == 0) {
 			reconfig_mode = DAXCTL_DEV_MODE_DEVDAX;
 			if (param.no_online) {
@@ -321,9 +487,6 @@ static const char *parse_device_options(int argc, const char **argv,
 			align = __parse_size64(param.align, &units);
 		/* fall through */
 	case ACTION_ONLINE:
-		if (param.no_movable)
-			mem_zone = MEM_ZONE_NORMAL;
-		/* fall through */
 	case ACTION_DESTROY:
 	case ACTION_OFFLINE:
 	case ACTION_DISABLE:
@@ -336,7 +499,7 @@ static const char *parse_device_options(int argc, const char **argv,
 		return NULL;
 	}
 
-	return argv[0];
+	return device;
 }
 
 static int dev_online_memory(struct daxctl_dev *dev)
@@ -513,6 +676,13 @@ static int dev_destroy(struct daxctl_dev *dev)
 		return rc;
 
 	rc = daxctl_region_destroy_dev(daxctl_dev_get_region(dev), dev);
+	/*
+	 * The kernel treats daxX.0 specially. It can't be deleted to ensure
+	 * there is always a /sys/bus/dax/ present. If this happens, an
+	 * EBUSY is returned. Expect it and don't treat it as an error.
+	 */
+	if (daxctl_dev_get_id(dev) == 0 && rc == -EBUSY)
+		return 0;
 	if (rc < 0)
 		return rc;
 
@@ -541,7 +711,17 @@ static int disable_devdax_device(struct daxctl_dev *dev)
 
 static int reconfig_mode_system_ram(struct daxctl_dev *dev)
 {
+	const char *devname = daxctl_dev_get_devname(dev);
 	int rc, skip_enable = 0;
+
+	if (param.no_online || !param.no_movable) {
+		if (!param.force && daxctl_dev_will_auto_online_memory(dev)) {
+			fprintf(stderr,
+				"%s: error: kernel policy will auto-online memory, aborting\n",
+				devname);
+			return -EBUSY;
+		}
+	}
 
 	if (daxctl_dev_is_enabled(dev)) {
 		rc = disable_devdax_device(dev);
@@ -833,7 +1013,7 @@ static int do_xaction_device(const char *device, enum device_action action,
 	struct json_object *jdevs = NULL;
 	struct daxctl_region *region;
 	struct daxctl_dev *dev;
-	int rc = -ENXIO;
+	int rc = -ENXIO, saved_rc = 0;
 
 	*processed = 0;
 
@@ -880,6 +1060,8 @@ static int do_xaction_device(const char *device, enum device_action action,
 				rc = -EINVAL;
 				break;
 			}
+			if (rc)
+				saved_rc = rc;
 		}
 	}
 
@@ -891,7 +1073,7 @@ static int do_xaction_device(const char *device, enum device_action action,
 	if (jdevs)
 		util_display_json_array(stdout, jdevs, flags);
 
-	return rc;
+	return saved_rc;
 }
 
 int cmd_create_device(int argc, const char **argv, struct daxctl_ctx *ctx)
